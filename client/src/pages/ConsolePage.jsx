@@ -4,11 +4,14 @@ import { formatTime, formatClock, formatDeviation, liveRemaining, liveAgenda } f
 import AgendaPanel from './AgendaPanel.jsx';
 import CuePanel from './CuePanel.jsx';
 import MarkerPanel from './MarkerPanel.jsx';
+import InspectionPanel from './InspectionPanel.jsx';
 
 // 控制台：同一时刻全服务仅一个实例可持有控制权。
 export default function ConsolePage() {
-  const { snap, screens, markers, connState, control, lastError, send, acquire, release, clearError } =
-    useSocket({ role: 'console' });
+  const {
+    snap, screens, markers, inspection, gateEvent, connState, control, lastError,
+    send, acquire, release, clearError,
+  } = useSocket({ role: 'console' });
   const [minutes, setMinutes] = useState(5);
   const [seconds, setSeconds] = useState(0);
   const [, force] = useState(0);
@@ -38,6 +41,18 @@ export default function ConsolePage() {
   const curRow = agenda?.items.find((it) => it.status === 'current') ?? null;
   const curIdx = agenda ? agenda.items.findIndex((it) => it.id === agenda.currentId) : -1;
   const nextRow = curIdx >= 0 ? agenda.items[curIdx + 1] ?? null : null;
+
+  // 设备巡检门禁：仅拦截“从零开始”（idle/finished），暂停后的继续不受影响
+  const gate = inspection?.gate ?? null;
+  const startBlocked = (phase === 'idle' || phase === 'finished')
+    && !!gate && gate.enabled && !gate.armed;
+  const startBlockTitle = startBlocked
+    ? `巡检门禁未放行：${gate.reason === 'fault'
+      ? '存在必检项故障'
+      : gate.reason === 'pending'
+        ? '仍有必检项待检'
+        : '清单变更后需重新完成全部必检'}`
+    : '';
 
   return (
     <div className="console">
@@ -112,13 +127,23 @@ export default function ConsolePage() {
         </section>
       )}
 
+      <InspectionPanel
+        inspection={inspection}
+        gateEvent={gateEvent}
+        canEdit={control.granted}
+        send={send}
+        lastError={lastError}
+        onClearError={clearError}
+      />
+
       <fieldset className="panel" disabled={!control.granted}>
         <legend>计时控制</legend>
         <div className="controls">
           <button
             className="btn btn-start"
             onClick={() => cmd('start')}
-            disabled={phase === 'running'}
+            disabled={phase === 'running' || startBlocked}
+            title={startBlocked ? startBlockTitle : '待开始/超时后开始需先通过巡检门禁'}
           >
             ▶ 开始
           </button>
@@ -153,6 +178,11 @@ export default function ConsolePage() {
         {snap?.finished && agenda?.currentId && (
           <p className="hint hint-overtime">
             已超时：偏差正逐秒累积，后续普通环节预计开始时间持续后移；点击“结束本环节”固化顺延。
+          </p>
+        )}
+        {startBlocked && (
+          <p className="hint hint-gate">
+            ⛔ {startBlockTitle}。请在上方“设备巡检门禁”面板逐项登记，全部必检项通过后方可开始。
           </p>
         )}
       </fieldset>

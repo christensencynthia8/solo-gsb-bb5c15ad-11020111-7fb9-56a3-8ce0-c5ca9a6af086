@@ -11,6 +11,12 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { normalizeItems, projectAgenda, genItemId } from './agenda.js';
+import {
+  defaultInspection,
+  setChecklist,
+  registerResult,
+  evaluateGate,
+} from './inspection.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '../../client/dist');
@@ -273,6 +279,66 @@ function remainingNow() {
     return Math.max(0, timer.deadlineMono - nowMono());
   }
   return timer.remainingMs;
+}
+
+// ---------------------------------------------------------------------------
+// 设备巡检门禁（inspection）
+// 持有者可维护最多 30 项巡检项（名称/区域/必检标记），并逐项登记“通过/故障备注”。
+// 服务端仅在所有必检项均为通过、且放行所依据的清单版本未变化时允许“开始当前计时”。
+// 任一必检项被改回故障、或清单被编辑保存（全部状态重置为待检）后，门禁立即失效，
+// 并向所有控制台类连接广播失效原因；重新逐项巡检全部通过后才再次放行。
+// 数据仅存服务端内存（与议程/标记同级），服务进程重启即回到初始空清单。
+// 巡检消息与现场标记一样按角色过滤：已注册为投屏的连接不接收巡检更新。
+// ---------------------------------------------------------------------------
+const inspection = defaultInspection();
+
+// 门禁失效原因的人读文案（同时下发 code，客户端可自行措辞）
+const GATE_REASON_TEXT = {
+  fault: '存在必检项故障',
+  pending: '仍有必检项待检',
+  recheck: '清单变更后需重新完成全部必检',
+  version_changed: '巡检版本已变化，请重新完成必检',
+};
+
+function publicInspectionItem(it) {
+  return { id: it.id, name: it.name, area: it.area, required: it.required, status: it.status, note: it.note };
+}
+
+function inspectionPayload() {
+  const gate = evaluateGate(inspection);
+  return {
+    type: 'inspection',
+    epoch,
+    seq: inspection.seq,
+    armedSeq: inspection.armedSeq,
+    gate,
+    items: inspection.items.map(publicInspectionItem),
+  };
+}
+
+// 已注册为投屏的连接不接收任何巡检消息，确保巡检信息只出现在控制台
+function broadcastInspection() {
+  const msg = inspectionPayload();
+  for (const c of clients) {
+    if (!c.screenId) send(c.ws, msg);
+  }
+}
+
+// 门禁放行状态翻转（放行→失效 / 失效→放行）时广播原因；同态登记不打扰。
+function broadcastGateChange(prev, next) {
+  if (prev.armed === next.armed) return;
+  const msg = {
+    type: 'inspection_gate',
+    epoch,
+    seq: inspection.seq,
+    armed: next.armed,
+    gate: next,
+    reason: next.armed ? null : next.reason,
+    reasonText: next.armed ? null : (GATE_REASON_TEXT[next.reason] ?? '巡检门禁未放行'),
+  };
+  for (const c of clients) {
+    if (!c.screenId) send(c.ws, msg);
+  }
 }
 
 // 当前议程推演视图：projectAgenda 结果 + 当前环节实时偏差。
@@ -638,8 +704,15 @@ function handleCommand(client, msg) {
         return;
       }
       if (timer.phase === 'paused') {
+        // 暂停后“继续”是同一次计时的延续，不经巡检门禁（门禁只拦截从零开始）
         resumeTimer();
       } else {
+        // 待开始/已超时后重新开始：必须通过设备巡检门禁
+        const gate = evaluateGate(inspection);
+        if (gate.enabled && !gate.armed) {
+          fail(client, 'INSPECTION_GATE', `巡检门禁未放行：${GATE_REASON_TEXT[gate.reason] ?? '必检项未全部通过'}`);
+          return;
+        }
         startTimer(timer.durationMs);
       }
       broadcastSnapshot();
@@ -733,6 +806,37 @@ function handleCommand(client, msg) {
         return;
       }
       broadcastMarkers();
+      return;
+    }
+
+    case 'inspection_set': {
+      // 整体替换巡检清单：最多 30 项（名称/区域/必检）；校验失败状态不变。
+      // 任何实际编辑都把全部登记重置为待检并使门禁立即失效（版本递增）。
+      const prev = evaluateGate(inspection);
+      const r = setChecklist(inspection, msg.items);
+      if (r.error) {
+        fail(client, r.error, r.message);
+        return;
+      }
+      if (r.changed) {
+        Object.assign(inspection, r.state);
+        broadcastInspection();
+        broadcastGateChange(prev, evaluateGate(inspection));
+      }
+      return;
+    }
+
+    case 'inspection_check': {
+      // 逐项登记通过/故障（故障必填备注）；任一必检项改回故障立即使门禁失效并广播原因
+      const prev = evaluateGate(inspection);
+      const r = registerResult(inspection, msg.id, msg.status, msg.note);
+      if (r.error) {
+        fail(client, r.error, r.message);
+        return;
+      }
+      Object.assign(inspection, r.state);
+      broadcastInspection();
+      broadcastGateChange(prev, r.gate);
       return;
     }
 
@@ -835,6 +939,8 @@ wss.on('connection', (ws) => {
   send(ws, { type: 'screens', epoch, screens: [...screens.values()].map(publicScreen) });
   // 现场标记随首包一并下发（此刻尚未注册为投屏）；投屏注册后不再收到标记更新
   send(ws, markersPayload());
+  // 设备巡检门禁状态同样随首包下发（此刻尚未注册为投屏）
+  send(ws, inspectionPayload());
 });
 
 setInterval(tick, TICK_MS).unref();

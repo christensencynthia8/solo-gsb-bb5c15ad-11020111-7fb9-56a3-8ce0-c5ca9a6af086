@@ -102,6 +102,24 @@ docker run --rm -p 3000:3000 --name venue-countdown venue-countdown
 6. “本场会话”= 一个服务进程生命周期：服务 / 容器重启即清空并开始新会话（带新的 `sessionId`）；
    数据只存服务端内存，不引入数据库或文件。
 
+### 设备巡检门禁（inspection）
+
+开始当前计时前，可用“设备巡检门禁”强制完成逐项设备检查：
+
+1. 在控制台 **设备巡检门禁** 面板点 **维护巡检项**，维护最多 **30 项**巡检项：
+   每项含**名称**（如“无线麦”）、**区域**（如“主席台”，可空）与 **必检** 标记，保存后同步。
+2. 持有者在登记态对每项逐项登记：**✓ 通过**，或填写**故障备注**（1~100 字，必填）后登记 **✕ 故障**。
+   面板每项实时显示 **待检（灰）/ 通过（绿）/ 故障（红）**，顶部汇总各项计数。
+3. 门禁由**服务端权威判定**：仅当**全部必检项均为通过**、且放行所依据的巡检清单版本未变化时，
+   “开始”才会被服务端接受；否则服务端拒绝并返回 `INSPECTION_GATE`，控制台“开始”按钮同步置灰并提示原因。
+4. **任一必检项被改回故障**，门禁**立即失效**并向所有控制台连接广播原因（面板顶部红条即时提示）；
+   **编辑清单**（增删项、改名称/区域/必检）保存后全部登记重置为待检、巡检版本递增、门禁立即失效，
+   需逐项重新登记、全部必检复检通过后才再次放行。内容无变化的保存不会使门禁失效。
+5. **非必检项**不参与门禁：其待检 / 故障状态不拦截开始。没有任何必检项时门禁不启用、不拦截开始。
+6. 门禁只拦截“从零开始”（待开始 / 超时后重新开始）；**暂停后的“继续”**以及
+   “结束本环节 / 进入下一环节”的自动连续计时不受门禁限制，巡检中途出故障不会掐断正在进行的发言。
+7. 巡检数据仅存服务端内存（服务 / 容器重启即清空），仅持有者可维护与登记；**投屏不显示任何巡检信息**。
+
 投屏页建议按 **F11** 全屏。另起一台电脑/平板做控制台时，把 `localhost` 换成本机局域网 IP 即可。
 
 ## 本地开发（不用 Docker）
@@ -155,6 +173,14 @@ npm install && npm run build && npm start
   - 标记消息仅推送给控制台类连接，**投屏永不显示**；
   - 暂停、重连、进入下一环节、改写议程都不改变历史标记的顺序与归属；
     仅存服务端内存，服务 / 容器重启即开启新会话（新 `sessionId`）。
+- **设备巡检门禁**：
+  - 持有者维护最多 **30 项**巡检项（名称 / 区域 / **必检**标记），逐项登记**通过**或带备注的**故障**；
+  - 服务端仅在**全部必检项为通过**且放行所依据的巡检版本（`seq`）未变化时接受“开始当前计时”，
+    否则拒绝（`INSPECTION_GATE`），控制台开始按钮置灰并提示原因（故障 / 待检 / 清单变更需重检）；
+  - 任一必检项被改回故障、或清单被编辑（状态全部重置、版本递增），门禁**立即失效并广播原因**；
+    重新逐项登记、全部必检复检通过后才再次放行；
+  - 非必检项不参与门禁；无必检项时门禁不启用；暂停后的“继续”与“进入下一环节”不受门禁限制；
+  - 巡检消息按连接角色过滤，**投屏永不显示**；仅存服务端内存，服务 / 容器重启即清空。
 
 ## 设计要点（对应可靠性要求）
 
@@ -187,6 +213,12 @@ npm install && npm run build && npm start
    甚至整体改写议程都不会回写历史标记。发生时刻同时记录单调时钟（会话内 `T+`，不受挂钟回拨影响）
    与 ISO 挂钟时间（供人读与导出）。消息按连接角色过滤：已注册为投屏的连接不接收标记更新，
    从通道层面保证投屏不显示标记。
+8. **巡检门禁为服务端权威的版本化放行**：门禁判定（`server/src/inspection.js` 纯函数）只依据
+   必检项状态与放行锚点 `armedSeq`——全部必检项通过时在当前清单版本 `seq` 上锚定放行；
+   必检项被登记回故障立即清除锚点，编辑清单则版本递增、全部状态重置为待检并清除锚点。
+   客户端按钮置灰只是体验优化，真正的开始动作由服务端再次判定（纵深防御），任何绕过界面的
+   `start` 同样会被拒绝。门禁状态翻转（放行↔失效）才单独广播 `inspection_gate`（含原因），
+   普通登记只下发整体替换的 `inspection` 消息；两类消息均带 epoch 守卫且不发给投屏连接。
 
 ## WebSocket 协议（`/ws`）
 
@@ -212,6 +244,16 @@ npm install && npm run build && npm start
 // 现场标记（仅持有者；运行/暂停/超时/待开始均可记录）
 { "command": "mark_add", "name": "发言切换" } // 1~30 字；记录瞬间固化时刻/归属/偏差
 { "command": "mark_delete_latest" }           // 删除本场会话最近一条（seq 最大者）
+
+// 设备巡检门禁（均仅持有者；投屏不接收巡检消息）
+{ "command": "inspection_set", "items": [     // 整体替换巡检清单（最多 30 项）；实际编辑后全部重置为待检
+    { "id": "i-mic1", "name": "无线麦", "area": "主席台", "required": true },
+    { "id": "i-exit", "name": "消防通道", "area": "出口", "required": false } ] }
+{ "command": "inspection_check", "id": "i-mic1", "status": "pass" }              // 逐项登记通过
+{ "command": "inspection_check", "id": "i-mic1", "status": "fault",
+  "note": "开机无声" }                      // 故障必填 1~100 字备注；必检项故障立即使门禁失效
+// start 在 idle/finished 下受门禁拦截：全部必检通过且 armedSeq===seq 才接受（否则 INSPECTION_GATE）；
+// 暂停后的 resume 与 advance 的自动连续计时不经过门禁
 
 // 后台提示（投屏身份/改名/上报无需控制权；cue_send 仅持有者）
 { "command": "screen_register", "screenId": "s-<uuid>", "name": "主席台主屏" } // 投屏每次连接/重连注册
@@ -264,6 +306,20 @@ npm install && npm run build && npm start
     "itemElapsedMs": 45000,                 // 记录瞬间该环节已用时长（暂停冻结）；无环节为 null
     "deviationMs": -2000 } ] }              // 记录瞬间相对计划偏差（顺延量+本环节超时量）
 // 错误码：BAD_MARK（名称为空或超 30 字）、MARK_LIMIT（本场超过 1000 条）、NO_MARK（空列表删除）
+
+// 设备巡检门禁（整体替换；连接首包下发一次，清单编辑/逐项登记后下发；已注册投屏的连接不收）
+{ "type": "inspection", "epoch": "...", "seq": 2, "armedSeq": 2,
+  "gate": { "enabled": true, "armed": true, "reason": null, "requiredTotal": 2 },
+  // 未放行时 reason: pending（有待检）| fault（必检项故障，带 reasonItem{id,name,note}）
+  //                | recheck / version_changed（放行锚点缺失或版本已变）
+  "items": [ { "id": "i-mic1", "name": "无线麦", "area": "主席台", "required": true,
+               "status": "pass", "note": "" } ] } // status: pending | pass | fault
+// 门禁放行状态翻转时单独广播（普通登记不打扰）；失效带原因与人读文案
+{ "type": "inspection_gate", "epoch": "...", "seq": 2, "armed": false,
+  "reason": "fault", "reasonText": "存在必检项故障", "gate": { /* 同 inspection.gate */ } }
+// 开始被门禁拦截：{ "type": "error", "code": "INSPECTION_GATE", "message": "巡检门禁未放行：…" }
+// 错误码：BAD_INSPECTION（清单非法/超 30 项/故障缺备注）、NOT_FOUND（巡检项已被编辑删除）、
+//         INSPECTION_GATE（必检未全部通过或巡检版本变化时开始）
 // 错误码：BAD_SCREEN（屏幕 ID 非法）、BAD_CUE（类型/文案/目标非法）、
 //         BAD_TARGET（目标屏幕不存在）、NO_SCREEN（全发时无在线屏）、
 //         NOT_YOUR_SCREEN（替别的屏幕改名/确认）、NOT_SCREEN（未注册即改名）
@@ -278,26 +334,28 @@ npm install && npm run build && npm start
 ├── package.json             # npm workspaces 根清单
 ├── server/
 │   └── src/
-│       ├── index.js         # HTTP 静态服务 + WebSocket 状态机/租约 + 屏幕与后台提示 + 现场标记
-│       └── agenda.js        # 议程偏差推演纯函数（顺延 / 固定点压缩 / 校验）
+│       ├── index.js         # HTTP 静态服务 + WebSocket 状态机/租约 + 屏幕与后台提示 + 现场标记 + 巡检门禁
+│       ├── agenda.js        # 议程偏差推演纯函数（顺延 / 固定点压缩 / 校验）
+│       └── inspection.js    # 巡检门禁纯函数（清单校验 / 逐项登记 / 版本化放行判定）
 └── client/
     ├── vite.config.js       # 开发代理 /ws -> localhost:3000
     └── src/
-        ├── useSocket.js     # 自动重连、版本防回滚（快照+提示）、心跳续租、屏幕注册、标记列表
+        ├── useSocket.js     # 自动重连、版本防回滚（快照+提示）、心跳续租、屏幕注册、标记/巡检列表
         ├── time.js          # 单调时钟插值、议程时钟格式化、挂钟时间/CSV 工具
         ├── guard.js         # 快照版本守卫 + 提示 cueSeq 守卫
         ├── screen.js        # 投屏持久屏幕 ID / 显示名（localStorage）
-        └── pages/           # ConsolePage / DisplayPage / HomePage / AgendaPanel / CuePanel / MarkerPanel
+        └── pages/           # ConsolePage / DisplayPage / HomePage / AgendaPanel / CuePanel / MarkerPanel / InspectionPanel
 ```
 
 ## 测试
 
 ```bash
 npm test
-# guard.test.mjs   快照版本守卫 + 提示 cueSeq 守卫纯函数
-# agenda.test.mjs  议程偏差推演纯函数（提前/超时/固定点压缩）
-# cue.test.mjs     后台提示端到端（注册/三态/覆盖/旧确认丢弃/补发/群发/校验，自带独立实例）
-# marker.test.mjs  现场标记端到端（权限/校验/归属固化/暂停冻结/重连/advance/超时偏差/投屏不收，自带独立实例）
-# e2e.mjs          WebSocket 端到端冒烟（需先启动服务端，默认端口 3000，可用 PORT 覆盖）
-# lease.test.mjs   失联自动释放与接管（自带独立测试实例）
+# guard.test.mjs       快照版本守卫 + 提示 cueSeq 守卫纯函数
+# agenda.test.mjs      议程偏差推演纯函数（提前/超时/固定点压缩）
+# cue.test.mjs         后台提示端到端（注册/三态/覆盖/旧确认丢弃/补发/群发/校验，自带独立实例）
+# marker.test.mjs      现场标记端到端（权限/校验/归属固化/暂停冻结/重连/advance/超时偏差/投屏不收，自带独立实例）
+# inspection.test.mjs  设备巡检门禁端到端（权限/校验/放行拦截/故障立即失效广播/编辑版本重置/继续不拦截/投屏不收，自带独立实例）
+# e2e.mjs              WebSocket 端到端冒烟（需先启动服务端，默认端口 3000，可用 PORT 覆盖）
+# lease.test.mjs       失联自动释放与接管（自带独立测试实例）
 ```

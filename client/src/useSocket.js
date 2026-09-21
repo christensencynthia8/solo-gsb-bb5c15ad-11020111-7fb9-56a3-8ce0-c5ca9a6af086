@@ -17,6 +17,8 @@ export function useSocket({ role, screenRef }) {
   const [screens, setScreens] = useState([]);          // 控制台：所有投屏及最新提示状态
   const [markers, setMarkers] = useState([]);          // 控制台：本场会话现场标记（投屏收不到更新）
   const [markerMeta, setMarkerMeta] = useState(null);  // { sessionId } 本场会话信息
+  const [inspection, setInspection] = useState(null);  // 控制台：设备巡检门禁状态（投屏收不到更新）
+  const [gateEvent, setGateEvent] = useState(null);    // 门禁放行/失效翻转事件（含原因），供横幅提示
   const [cue, setCue] = useState(null);                // 投屏：当前上屏的提示
   const [screenConflict, setScreenConflict] = useState(false); // 投屏：同一 ID 被新连接顶替
   const [connState, setConnState] = useState('connecting'); // connecting | open | reconnecting
@@ -113,6 +115,8 @@ export function useSocket({ role, screenRef }) {
           baselineRef.current = { currentEpoch: msg.epoch, currentVersion: 0 };
           cueBaselineRef.current = { currentEpoch: msg.epoch, cueSeq: 0 };
           reportedCueRef.current = 0;
+          // 新纪元：丢弃上一纪元残留的门禁横幅（权威状态随 inspection 首包重建）
+          setGateEvent(null);
           return;
         }
 
@@ -147,6 +151,36 @@ export function useSocket({ role, screenRef }) {
           }
           setMarkerMeta({ sessionId: msg.sessionId });
           setMarkers(Array.isArray(msg.markers) ? msg.markers : []);
+          return;
+        }
+
+        if (msg.type === 'inspection') {
+          // 巡检清单/门禁状态由服务端权威整体替换；旧纪元残留消息丢弃
+          if (baselineRef.current.currentEpoch !== null && msg.epoch !== baselineRef.current.currentEpoch) {
+            return;
+          }
+          setInspection({
+            seq: msg.seq,
+            armedSeq: msg.armedSeq,
+            gate: msg.gate,
+            items: Array.isArray(msg.items) ? msg.items : [],
+          });
+          return;
+        }
+
+        if (msg.type === 'inspection_gate') {
+          // 门禁翻转（放行↔失效）广播：失效时带原因，供控制台横幅即时提示
+          if (baselineRef.current.currentEpoch !== null && msg.epoch !== baselineRef.current.currentEpoch) {
+            return;
+          }
+          setGateEvent({
+            atMono: monoNow(),
+            armed: !!msg.armed,
+            reason: msg.reason ?? null,
+            reasonText: msg.reasonText ?? '',
+            gate: msg.gate ?? null,
+            seq: msg.seq,
+          });
           return;
         }
 
@@ -244,6 +278,8 @@ export function useSocket({ role, screenRef }) {
     screens,
     markers,
     markerMeta,
+    inspection,
+    gateEvent,
     cue,
     screenConflict,
     connState,
