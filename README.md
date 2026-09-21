@@ -8,6 +8,9 @@
 未送达 / 已显示 / 已确认。控制台还提供**现场标记**：持有控制权时在当前环节记录带名称的
 事件（发言切换、设备故障等），服务端以单调时钟固化发生时刻、归属环节与相对计划偏差，
 按时间线展示、可删除最近一条并按本场会话导出 CSV（投屏不显示任何标记）。
+控制台另有**设备巡检门禁**：维护最多 30 项带必检标记的巡检项（名称、区域）并逐项登记
+待检 / 通过 / 故障（故障必填备注）；仅当所有必检项均为通过且巡检版本未变化时才允许
+开始计时，任一必检项被改回故障 / 待检或清单被编辑，门禁立即失效并向全场广播原因。
 
 - **后端**：Node.js 原生 HTTP + [`ws`](https://github.com/websockets/ws) WebSocket
 - **前端**：React 18 + Vite（控制台 `/console`、投屏 `/display`）
@@ -68,6 +71,24 @@ docker run --rm -p 3000:3000 --name venue-countdown venue-countdown
 2. 点某一行的 **设为当前** 载入该环节并开始倒计时；运行中可暂停/继续，
    点 **结束本环节 / 进入下一环节** 按实际结束点固化偏差并自动开始下一环节。
 3. 投屏页无需任何操作，即同步显示当前环节名称、倒计时、下一环节与预计开始时间。
+
+### 设备巡检门禁（inspection gate）
+
+1. 在控制台 **设备巡检门禁** 面板点 **✎ 编辑清单**：逐项维护巡检项的 **名称、区域**，
+   勾选 **必检** 标记（最多 **30 项**），点 **保存清单** 整体下发；
+   保存即视为编辑：门禁立即失效、全部巡检项回到 **待检**。
+2. 持有控制权者在清单中逐项登记：**✓ 通过**、**✗ 故障**（需先在该行填写故障备注，
+   1~60 字）或 **↺ 待检**；每行实时显示 待检 / 通过 / 故障 状态与故障备注。
+3. 面板顶部横幅实时显示门禁状态：**所有必检项均为通过** 时绿色“门禁已放行”，
+   否则红色“门禁未放行”并给出原因（如“必检项「主扩音响」登记为故障：无声音输出”）。
+4. **开始计时受门禁约束**：存在必检项时，必须全部通过且控制台确认的巡检版本
+   （`inspection.seq`）未被新的登记/编辑改变，服务端才允许开始；
+   否则返回 `INSPECT_GATE` / `INSPECT_STALE` 错误，控制台“▶ 开始”按钮同步禁用并提示原因。
+5. **任一必检项被改回故障 / 待检、或清单被编辑，门禁立即失效**并向所有连接广播原因；
+   门禁只拦截“开始”（idle/finished → running）：暂停后继续、`advance` 进入下一环节
+   属于同一场计时的延续，不重复过闸；已在运行的计时不会被门禁打断。
+6. 无必检项（含空清单）时门禁视为放行，旧客户端不带巡检版本的 `start` 仍然可用。
+7. 巡检状态只存服务端内存：服务 / 容器重启即清空，需重新维护清单并登记。
 
 ### 后台提示（cue）
 
@@ -155,6 +176,13 @@ npm install && npm run build && npm start
   - 标记消息仅推送给控制台类连接，**投屏永不显示**；
   - 暂停、重连、进入下一环节、改写议程都不改变历史标记的顺序与归属；
     仅存服务端内存，服务 / 容器重启即开启新会话（新 `sessionId`）。
+- **设备巡检门禁**：
+  - 维护最多 30 项巡检项（名称、区域、必检标记），逐项登记 待检 / 通过 / 故障（故障必填 ≤60 字备注）；
+  - 每次登记或清单编辑都使巡检版本 `inspection.seq` 单调递增；
+  - 仅当所有必检项均为通过、且 `start` 携带的 `inspectSeq` 等于当前版本时才允许开始计时；
+  - 任一必检项被改回故障 / 待检或清单被编辑，门禁立即失效并向所有连接广播失效原因；
+  - 门禁只拦截“开始”：暂停后继续 / advance 不重复过闸，运行中的计时不被打断；
+    无必检项时视为放行（兼容旧客户端）；状态仅存服务端内存。
 
 ## 设计要点（对应可靠性要求）
 
@@ -187,6 +215,13 @@ npm install && npm run build && npm start
    甚至整体改写议程都不会回写历史标记。发生时刻同时记录单调时钟（会话内 `T+`，不受挂钟回拨影响）
    与 ISO 挂钟时间（供人读与导出）。消息按连接角色过滤：已注册为投屏的连接不接收标记更新，
    从通道层面保证投屏不显示标记。
+8. **巡检门禁 = 开始计时的服务端前置闸**：巡检清单与登记结果只存服务端内存，
+   任何变更（`inspect_set` 编辑 / `inspect_report` 登记）都使 `inspection.seq` 单调递增并
+   立即整体广播（含门禁状态与失效原因）。`start`（仅 idle/finished → running 的“开始”，
+   暂停后继续与 advance 不算）在服务端做两道检查：所有必检项均为通过（无必检项视为放行，
+   兼容旧客户端），且客户端携带的 `inspectSeq` 等于当前版本——两道都过才允许开始，
+   否则分别返回 `INSPECT_GATE` / `INSPECT_STALE`。由于每次变更都即时广播，
+   控制台按过期清单放行的窗口被版本比对彻底封死；门禁失效原因随广播送达所有连接。
 
 ## WebSocket 协议（`/ws`）
 
@@ -197,7 +232,7 @@ npm install && npm run build && npm start
 { "command": "heartbeat" }                   // 租约心跳（5s）
 { "command": "release" }                     // 主动释放
 { "command": "set_duration", "durationMs": 300000 }
-{ "command": "start" }
+{ "command": "start", "inspectSeq": 4 }         // 存在必检项时必须携带当前巡检版本
 { "command": "pause" }
 { "command": "resume" }
 { "command": "reset", "durationMs": 300000 } // durationMs 可省略
@@ -212,6 +247,12 @@ npm install && npm run build && npm start
 // 现场标记（仅持有者；运行/暂停/超时/待开始均可记录）
 { "command": "mark_add", "name": "发言切换" } // 1~30 字；记录瞬间固化时刻/归属/偏差
 { "command": "mark_delete_latest" }           // 删除本场会话最近一条（seq 最大者）
+
+// 设备巡检门禁（仅持有者；变更即整体广播并使 seq 递增）
+{ "command": "inspect_set", "items": [        // 整体替换清单（≤30 项），全部回到待检
+    { "name": "主扩音响", "area": "主席台", "required": true } ] }  // 名称 1~30 字，区域 1~20 字
+{ "command": "inspect_report", "id": "i-xxxx", "status": "pass" }   // pass | pending
+{ "command": "inspect_report", "id": "i-xxxx", "status": "fault", "note": "无声音输出" } // 故障备注 1~60 字必填
 
 // 后台提示（投屏身份/改名/上报无需控制权；cue_send 仅持有者）
 { "command": "screen_register", "screenId": "s-<uuid>", "name": "主席台主屏" } // 投屏每次连接/重连注册
@@ -264,6 +305,18 @@ npm install && npm run build && npm start
     "itemElapsedMs": 45000,                 // 记录瞬间该环节已用时长（暂停冻结）；无环节为 null
     "deviationMs": -2000 } ] }              // 记录瞬间相对计划偏差（顺延量+本环节超时量）
 // 错误码：BAD_MARK（名称为空或超 30 字）、MARK_LIMIT（本场超过 1000 条）、NO_MARK（空列表删除）
+
+// 设备巡检门禁（整体替换；连接首包下发一次，之后每次登记/编辑变更时向所有连接广播）
+{ "type": "inspection", "epoch": "...", "seq": 4,   // seq 单调递增：start 须携带最新值
+  "gateOpen": false, "reqTotal": 2, "reqPass": 1,   // 必检项总数 / 已通过数
+  "invalidReason": "必检项「主扩音响」登记为故障：无声音输出", // 未放行原因；放行时为 null
+  "items": [ { "id": "i-xxxx", "name": "主扩音响", "area": "主席台", "required": true,
+               "status": "fault",                    // pending（待检）| pass（通过）| fault（故障）
+               "note": "无声音输出" } ] }             // 仅故障时有备注，否则为空串
+// 错误码：INSPECT_LIMIT（超过 30 项）、BAD_INSPECT（名称/区域/状态/故障备注非法）、
+//         INSPECT_NOT_FOUND（巡检项不存在）、
+//         INSPECT_GATE（必检项未全部通过，禁止开始）、
+//         INSPECT_STALE（inspectSeq 与当前巡检版本不一致，需重新确认）
 // 错误码：BAD_SCREEN（屏幕 ID 非法）、BAD_CUE（类型/文案/目标非法）、
 //         BAD_TARGET（目标屏幕不存在）、NO_SCREEN（全发时无在线屏）、
 //         NOT_YOUR_SCREEN（替别的屏幕改名/确认）、NOT_SCREEN（未注册即改名）
@@ -278,7 +331,7 @@ npm install && npm run build && npm start
 ├── package.json             # npm workspaces 根清单
 ├── server/
 │   └── src/
-│       ├── index.js         # HTTP 静态服务 + WebSocket 状态机/租约 + 屏幕与后台提示 + 现场标记
+│       ├── index.js         # HTTP 静态服务 + WebSocket 状态机/租约 + 屏幕与后台提示 + 现场标记 + 巡检门禁
 │       └── agenda.js        # 议程偏差推演纯函数（顺延 / 固定点压缩 / 校验）
 └── client/
     ├── vite.config.js       # 开发代理 /ws -> localhost:3000
@@ -287,7 +340,7 @@ npm install && npm run build && npm start
         ├── time.js          # 单调时钟插值、议程时钟格式化、挂钟时间/CSV 工具
         ├── guard.js         # 快照版本守卫 + 提示 cueSeq 守卫
         ├── screen.js        # 投屏持久屏幕 ID / 显示名（localStorage）
-        └── pages/           # ConsolePage / DisplayPage / HomePage / AgendaPanel / CuePanel / MarkerPanel
+        └── pages/           # ConsolePage / DisplayPage / HomePage / AgendaPanel / CuePanel / MarkerPanel / InspectionPanel
 ```
 
 ## 测试
@@ -298,6 +351,7 @@ npm test
 # agenda.test.mjs  议程偏差推演纯函数（提前/超时/固定点压缩）
 # cue.test.mjs     后台提示端到端（注册/三态/覆盖/旧确认丢弃/补发/群发/校验，自带独立实例）
 # marker.test.mjs  现场标记端到端（权限/校验/归属固化/暂停冻结/重连/advance/超时偏差/投屏不收，自带独立实例）
+# inspect.test.mjs 设备巡检门禁端到端（权限/清单校验/门禁开关/版本比对/失效广播/重连恢复，自带独立实例）
 # e2e.mjs          WebSocket 端到端冒烟（需先启动服务端，默认端口 3000，可用 PORT 覆盖）
 # lease.test.mjs   失联自动释放与接管（自带独立测试实例）
 ```

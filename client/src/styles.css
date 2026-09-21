@@ -640,3 +640,83 @@ body {
 .marker-phase-running { color: var(--green); border-color: rgba(46, 204, 113, .45); }
 .marker-phase-paused { color: var(--amber); border-color: rgba(255, 176, 32, .45); }
 .marker-phase-finished { color: var(--red); border-color: rgba(255, 68, 68, .5); }
+
+/* ---------------- 设备巡检门禁（控制台） ---------------- */
+.insp-gate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 4px 0 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.insp-gate-open {
+  color: var(--green);
+  background: rgba(46, 204, 113, .1);
+  border: 1px solid rgba(46, 204, 113, .45);
+}
+.insp-gate-closed {
+  color: #ff9b9b;
+  background: rgba(255, 68, 68, .1);
+  border: 1px solid rgba(255, 68, 68, .5);
+}
+
+.insp-table { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 12px; }
+.insp-row {
+  display: grid;
+  grid-template-columns: 28px minmax(130px, 1.3fr) minmax(90px, .9fr) minmax(180px, 1.8fr) minmax(180px, 1.4fr);
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid transparent;
+}
+.insp-row input {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 14px;
+  border-radius: 6px;
+  border: 1px solid #33405f;
+  background: #141c2e;
+  color: var(--text);
+}
+.insp-head {
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 8px;
+}
+.insp-head span { text-align: center; }
+.insp-idx { text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+.insp-name { font-weight: 700; overflow-wrap: anywhere; }
+.insp-area { color: #aebbd4; font-size: 13px; overflow-wrap: anywhere; }
+.insp-req-cell { text-align: center; }
+.insp-req-cell label { display: flex; align-items: center; justify-content: center; gap: 4px; cursor: pointer; font-size: 13px; }
+.insp-state { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.insp-note {
+  font-size: 12px;
+  color: var(--red);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.insp-note-input { flex: 1 1 140px; min-width: 120px; font-size: 12px !important; }
+.insp-ops { display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; }
+.insp-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+
+.insp-status-pass { border-color: rgba(46, 204, 113, .45); }
+.insp-status-fault { border-color: rgba(255, 68, 68, .55); }
+
+.insp-tag-req { color: var(--accent); border-color: rgba(79, 140, 255, .6); background: rgba(79, 140, 255, .12); }
+.insp-tag-pending { color: var(--amber); border-color: rgba(255, 176, 32, .6); background: rgba(255, 176, 32, .12); }
+.insp-tag-pass { color: var(--green); border-color: rgba(46, 204, 113, .6); background: rgba(46, 204, 113, .12); }
+.insp-tag-fault { color: var(--red); border-color: rgba(255, 68, 68, .6); background: rgba(255, 68, 68, .12); }
+
+.insp-btn-pass { background: rgba(46, 204, 113, .15); border-color: rgba(46, 204, 113, .5); color: var(--green); }
+.insp-btn-fault { background: rgba(255, 68, 68, .15); border-color: rgba(255, 68, 68, .5); color: #ff7676; }

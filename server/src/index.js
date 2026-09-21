@@ -3,7 +3,8 @@
 //  1. 以单调时钟（process.hrtime）维护全服务唯一的计时状态；
 //  2. 每次状态变更/心跳 tick 生成单调递增版本快照并广播；
 //  3. 控制台控制权为唯一租约，靠心跳续租，失联自动释放；
-//  4. 提供静态文件服务（生产模式直接托管客户端构建产物）。
+//  4. 设备巡检门禁：必检项全部通过且巡检版本未变化才允许开始计时；
+//  5. 提供静态文件服务（生产模式直接托管客户端构建产物）。
 
 import http from 'node:http';
 import path from 'node:path';
@@ -120,6 +121,151 @@ const SCREEN_ID_RE = /^s-[0-9a-zA-Z-]{8,64}$/;
 
 let cueSeq = 0;
 const screens = new Map(); // screenId -> { id, name, online, ws, client, cue }
+
+// ---------------------------------------------------------------------------
+// 设备巡检门禁（inspection gate）
+// 控制台持有者维护一份巡检清单（名称 + 区域 + 必检标记，最多 30 项），
+// 并逐项登记 待检 → 通过 / 故障（故障必填备注）。
+// 门禁 = 开始计时的前置条件：仅当所有必检项均为“通过”时放行；
+// 清单每次变更（编辑或登记）都使 inspection.seq 单调递增，控制台开始计时
+// 必须携带自己确认过的 seq，服务端比对不一致即拒绝（防止按过期清单放行）。
+// 任一必检项被改回故障/待检、或清单被编辑，门禁立即失效并随广播说明原因。
+// 门禁只拦截“开始”（idle/finished → running）；暂停后继续、advance 推进
+// 属于同一场计时的延续，不重复过闸。无必检项时门禁视为放行（兼容旧客户端）。
+// 状态只存服务端内存，随进程重启清空。
+// ---------------------------------------------------------------------------
+const MAX_INSPECTION_ITEMS = 30;
+const MAX_INSPECT_NAME_LEN = 30;
+const MAX_INSPECT_AREA_LEN = 20;
+const MAX_INSPECT_NOTE_LEN = 60;
+
+const inspection = {
+  items: [],           // { id, name, area, required, status: pending|pass|fault, note }
+  seq: 1,              // 巡检版本：清单编辑或任何登记变更都递增，永不归零
+  invalidReason: null, // 门禁未放行原因（放行时为 null），随 inspection 消息广播
+};
+
+const genInspectId = () => `i-${Math.random().toString(36).slice(2, 10)}`;
+
+// 必检项通过情况：open = 所有必检项均为通过（无必检项时视为放行）
+function inspectionGate() {
+  const required = inspection.items.filter((it) => it.required);
+  const passed = required.filter((it) => it.status === 'pass').length;
+  return { reqTotal: required.length, reqPass: passed, open: passed === required.length };
+}
+
+// 每次变更后刷新门禁与失效原因；cause 可指明本次失效的直接原因（优先展示）
+function refreshGate(cause = null) {
+  const g = inspectionGate();
+  if (g.open) {
+    inspection.invalidReason = null;
+  } else if (cause) {
+    inspection.invalidReason = cause;
+  } else {
+    const fault = inspection.items.find((it) => it.required && it.status === 'fault');
+    if (fault) {
+      inspection.invalidReason = `必检项「${fault.name}」登记为故障：${fault.note}`;
+    } else {
+      const pend = g.reqTotal - g.reqPass;
+      inspection.invalidReason = `还有 ${pend} 项必检项待登记通过`;
+    }
+  }
+  return g;
+}
+
+function publicInspectItem(it) {
+  return {
+    id: it.id,
+    name: it.name,
+    area: it.area,
+    required: it.required,
+    status: it.status,
+    note: it.note,
+  };
+}
+
+function inspectionPayload() {
+  const g = inspectionGate();
+  return {
+    type: 'inspection',
+    epoch,
+    seq: inspection.seq,
+    gateOpen: g.open,
+    reqTotal: g.reqTotal,
+    reqPass: g.reqPass,
+    invalidReason: inspection.invalidReason,
+    items: inspection.items.map(publicInspectItem),
+  };
+}
+
+// 门禁状态面向全部连接广播（含投屏）：任何终端都能立即看到失效原因
+function broadcastInspection() {
+  const msg = inspectionPayload();
+  for (const c of clients) send(c.ws, msg);
+}
+
+// 整体替换巡检清单（编辑即失效）：全部状态重置为待检，版本递增
+function setInspectionItems(rawItems) {
+  if (!Array.isArray(rawItems)) {
+    return { error: 'BAD_INSPECT', message: '巡检清单须为数组' };
+  }
+  if (rawItems.length > MAX_INSPECTION_ITEMS) {
+    return { error: 'INSPECT_LIMIT', message: `巡检项最多 ${MAX_INSPECTION_ITEMS} 项` };
+  }
+  const items = [];
+  for (let i = 0; i < rawItems.length; i++) {
+    const raw = rawItems[i] ?? {};
+    const name = String(raw.name ?? '').trim();
+    if (!name || name.length > MAX_INSPECT_NAME_LEN) {
+      return { error: 'BAD_INSPECT', message: `第 ${i + 1} 项名称需为 1~${MAX_INSPECT_NAME_LEN} 字` };
+    }
+    const area = String(raw.area ?? '').trim();
+    if (!area || area.length > MAX_INSPECT_AREA_LEN) {
+      return { error: 'BAD_INSPECT', message: `第 ${i + 1} 项区域需为 1~${MAX_INSPECT_AREA_LEN} 字` };
+    }
+    items.push({
+      id: genInspectId(),
+      name: name.slice(0, MAX_INSPECT_NAME_LEN),
+      area: area.slice(0, MAX_INSPECT_AREA_LEN),
+      required: !!raw.required,
+      status: 'pending',
+      note: '',
+    });
+  }
+  inspection.items = items;
+  inspection.seq += 1;
+  refreshGate(items.some((it) => it.required) ? '巡检清单已编辑，必检项需重新登记通过' : null);
+  return { ok: true, seq: inspection.seq };
+}
+
+// 逐项登记：通过 / 故障（必填备注）/ 改回待检；必检项的非通过登记立即使门禁失效
+function reportInspection(msg) {
+  const id = String(msg.id ?? '');
+  const it = inspection.items.find((x) => x.id === id);
+  if (!it) return { error: 'INSPECT_NOT_FOUND', message: '巡检项不存在（清单可能已被更新）' };
+  const status = String(msg.status ?? '');
+  if (!['pending', 'pass', 'fault'].includes(status)) {
+    return { error: 'BAD_INSPECT', message: '巡检状态须为 pending / pass / fault' };
+  }
+  let note = '';
+  if (status === 'fault') {
+    note = String(msg.note ?? '').trim();
+    if (!note || note.length > MAX_INSPECT_NOTE_LEN) {
+      return { error: 'BAD_INSPECT', message: `故障备注需为 1~${MAX_INSPECT_NOTE_LEN} 字` };
+    }
+  }
+  it.status = status;
+  it.note = status === 'fault' ? note.slice(0, MAX_INSPECT_NOTE_LEN) : '';
+  inspection.seq += 1;
+  // 必检项被改回故障/待检：以本次登记为失效直接原因立即广播
+  const cause = it.required && status === 'fault'
+    ? `必检项「${it.name}」登记为故障：${it.note}`
+    : it.required && status === 'pending'
+      ? `必检项「${it.name}」被改回待检`
+      : null;
+  refreshGate(cause);
+  return { ok: true, seq: inspection.seq };
+}
 
 const defaultScreenName = (id) => `投屏 ${String(id).slice(2, 8).toUpperCase()}`;
 
@@ -638,8 +784,22 @@ function handleCommand(client, msg) {
         return;
       }
       if (timer.phase === 'paused') {
+        // 暂停后继续属于同一场计时的延续，不重复过巡检门禁
         resumeTimer();
       } else {
+        // 设备巡检门禁：存在必检项时，必须全部通过且客户端确认的巡检版本未变化
+        const g = inspectionGate();
+        if (g.reqTotal > 0) {
+          if (!g.open) {
+            fail(client, 'INSPECT_GATE', `设备巡检门禁未放行：${inspection.invalidReason ?? '必检项未全部通过'}`);
+            return;
+          }
+          const seq = Number(msg.inspectSeq);
+          if (!Number.isInteger(seq) || seq !== inspection.seq) {
+            fail(client, 'INSPECT_STALE', '巡检结果已变化，请在巡检面板确认最新状态后再开始');
+            return;
+          }
+        }
         startTimer(timer.durationMs);
       }
       broadcastSnapshot();
@@ -733,6 +893,28 @@ function handleCommand(client, msg) {
         return;
       }
       broadcastMarkers();
+      return;
+    }
+
+    case 'inspect_set': {
+      // 整体替换巡检清单（仅持有者）：编辑即失效，全部回到待检
+      const r = setInspectionItems(msg.items);
+      if (r.error) {
+        fail(client, r.error, r.message);
+        return;
+      }
+      broadcastInspection();
+      return;
+    }
+
+    case 'inspect_report': {
+      // 逐项登记 通过/故障(备注)/待检（仅持有者）；必检项非通过立即使门禁失效并广播原因
+      const r = reportInspection(msg);
+      if (r.error) {
+        fail(client, r.error, r.message);
+        return;
+      }
+      broadcastInspection();
       return;
     }
 
@@ -835,6 +1017,8 @@ wss.on('connection', (ws) => {
   send(ws, { type: 'screens', epoch, screens: [...screens.values()].map(publicScreen) });
   // 现场标记随首包一并下发（此刻尚未注册为投屏）；投屏注册后不再收到标记更新
   send(ws, markersPayload());
+  // 巡检门禁状态随首包下发（所有连接，含投屏）：门禁失效原因对全场可见
+  send(ws, inspectionPayload());
 });
 
 setInterval(tick, TICK_MS).unref();

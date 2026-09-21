@@ -4,10 +4,11 @@ import { formatTime, formatClock, formatDeviation, liveRemaining, liveAgenda } f
 import AgendaPanel from './AgendaPanel.jsx';
 import CuePanel from './CuePanel.jsx';
 import MarkerPanel from './MarkerPanel.jsx';
+import InspectionPanel from './InspectionPanel.jsx';
 
 // 控制台：同一时刻全服务仅一个实例可持有控制权。
 export default function ConsolePage() {
-  const { snap, screens, markers, connState, control, lastError, send, acquire, release, clearError } =
+  const { snap, screens, markers, inspection, connState, control, lastError, send, acquire, release, clearError } =
     useSocket({ role: 'console' });
   const [minutes, setMinutes] = useState(5);
   const [seconds, setSeconds] = useState(0);
@@ -38,6 +39,11 @@ export default function ConsolePage() {
   const curRow = agenda?.items.find((it) => it.status === 'current') ?? null;
   const curIdx = agenda ? agenda.items.findIndex((it) => it.id === agenda.currentId) : -1;
   const nextRow = curIdx >= 0 ? agenda.items[curIdx + 1] ?? null : null;
+
+  // 设备巡检门禁：存在必检项且未全部通过时禁止“开始”（暂停后继续不受限）；
+  // 服务端为权威（拒绝并回错误），这里仅做界面提示与按钮禁用
+  const gateBlocked = !!inspection && inspection.reqTotal > 0 && !inspection.gateOpen;
+  const startBlocked = gateBlocked && phase !== 'paused';
 
   return (
     <div className="console">
@@ -117,8 +123,9 @@ export default function ConsolePage() {
         <div className="controls">
           <button
             className="btn btn-start"
-            onClick={() => cmd('start')}
-            disabled={phase === 'running'}
+            onClick={() => cmd('start', { inspectSeq: inspection?.seq })}
+            disabled={phase === 'running' || startBlocked}
+            title={startBlocked ? `设备巡检门禁未放行：${inspection.invalidReason}` : undefined}
           >
             ▶ 开始
           </button>
@@ -155,7 +162,19 @@ export default function ConsolePage() {
             已超时：偏差正逐秒累积，后续普通环节预计开始时间持续后移；点击“结束本环节”固化顺延。
           </p>
         )}
+        {startBlocked && (
+          <p className="hint hint-overtime">
+            ⛔ 设备巡检门禁未放行：{inspection.invalidReason}（在下方巡检面板登记通过后再开始）
+          </p>
+        )}
       </fieldset>
+
+      <InspectionPanel
+        inspection={inspection}
+        canEdit={control.granted}
+        send={send}
+        lastError={lastError}
+      />
 
       <fieldset className="panel" disabled={!control.granted}>
         <legend>设定时长（手动覆盖当前环节时长）</legend>

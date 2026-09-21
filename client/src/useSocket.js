@@ -17,6 +17,7 @@ export function useSocket({ role, screenRef }) {
   const [screens, setScreens] = useState([]);          // 控制台：所有投屏及最新提示状态
   const [markers, setMarkers] = useState([]);          // 控制台：本场会话现场标记（投屏收不到更新）
   const [markerMeta, setMarkerMeta] = useState(null);  // { sessionId } 本场会话信息
+  const [inspection, setInspection] = useState(null);  // 设备巡检门禁：{ seq, gateOpen, reqTotal, reqPass, invalidReason, items }
   const [cue, setCue] = useState(null);                // 投屏：当前上屏的提示
   const [screenConflict, setScreenConflict] = useState(false); // 投屏：同一 ID 被新连接顶替
   const [connState, setConnState] = useState('connecting'); // connecting | open | reconnecting
@@ -150,6 +151,22 @@ export function useSocket({ role, screenRef }) {
           return;
         }
 
+        if (msg.type === 'inspection') {
+          // 巡检门禁由服务端权威整体替换（含门禁状态与失效原因）；旧纪元残留消息丢弃
+          if (baselineRef.current.currentEpoch !== null && msg.epoch !== baselineRef.current.currentEpoch) {
+            return;
+          }
+          setInspection({
+            seq: msg.seq,
+            gateOpen: !!msg.gateOpen,
+            reqTotal: msg.reqTotal ?? 0,
+            reqPass: msg.reqPass ?? 0,
+            invalidReason: msg.invalidReason ?? null,
+            items: Array.isArray(msg.items) ? msg.items : [],
+          });
+          return;
+        }
+
         if (msg.type === 'cue' && role === 'display') {
           // 提示守卫：旧纪元 / 更小 cueSeq 的迟到消息一律丢弃；
           // cueSeq 相等为重连同一条补发（幂等），更大为新提示（覆盖）。
@@ -244,6 +261,7 @@ export function useSocket({ role, screenRef }) {
     screens,
     markers,
     markerMeta,
+    inspection,
     cue,
     screenConflict,
     connState,
